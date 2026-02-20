@@ -6,15 +6,15 @@ Playwright sessions and avoid IP bans.
 
 Current status
 --------------
-    Phase A  ✓  Extraction  (this file + extractors/)
-    Phase B  ○  Filtering   (processors/ – stub, wired in next iteration)
-    Phase C  ○  Storage     (database/   – stub, wired in next iteration)
+    Phase A  ✓  Extraction  (extractors/)
+    Phase B  ✓  Filtering   (processors/)
+    Phase C  ○  Storage     (database/ – stub, wired in next iteration)
 
 Usage
 -----
     pip install -r requirements.txt
     playwright install chromium
-    cp .env.example .env   # then fill in values
+    cp .env.example .env   # then fill in ANTHROPIC_API_KEY
     python main.py
 """
 
@@ -25,6 +25,7 @@ import os
 from dotenv import load_dotenv
 
 from extractors import GreenhouseExtractor, LeverExtractor, RawJob
+from processors import FilterResult, filter_jobs
 
 load_dotenv()
 
@@ -130,26 +131,40 @@ async def main() -> None:
         "Extraction complete | total_jobs_extracted=%d", len(all_jobs)
     )
 
-    # ── Phase B stub – filtering will be inserted here ────────────────────
-    # from processors.filter import filter_jobs
-    # filtered_jobs = await filter_jobs(all_jobs)
-    filtered_jobs = all_jobs  # pass-through until Phase B is wired in
+    # ── Phase B – filtering ───────────────────────────────────────────────
+    filter_results: list[FilterResult] = await filter_jobs(all_jobs)
+    passing_jobs = [r.job for r in filter_results if r.passed]
+    logger.info(
+        "Filtering complete | passed=%d / total=%d",
+        len(passing_jobs), len(all_jobs),
+    )
 
     # ── Phase C stub – storage will be inserted here ──────────────────────
     # from database.repository import upsert_jobs
-    # await upsert_jobs(filtered_jobs)
+    # await upsert_jobs(passing_jobs)
     logger.info(
         "Storage stub | jobs_to_store=%d (Phase C not yet wired)",
-        len(filtered_jobs),
+        len(passing_jobs),
     )
 
-    # ── Preview ───────────────────────────────────────────────────────────
-    logger.info("── Job preview (first 10) ──────────────────────────────")
-    for job in all_jobs[:10]:
+    # ── Preview: passing jobs ─────────────────────────────────────────────
+    logger.info("── Passing jobs preview (first 10) ─────────────────────")
+    for job in passing_jobs[:10]:
         logger.info(
             "  [%s] %r @ %r  (%s)",
             job.platform.upper(), job.title, job.company, job.location,
         )
+
+    # ── Preview: rejection log ────────────────────────────────────────────
+    rejected = [r for r in filter_results if not r.passed]
+    if rejected:
+        logger.info("── Rejected jobs (first 5) ──────────────────────────")
+        for result in rejected[:5]:
+            logger.info(
+                "  [%s] %r – gate=%s reason=%r",
+                result.gate.value, result.job.title,
+                result.gate.value, result.reasoning,
+            )
 
 
 if __name__ == "__main__":

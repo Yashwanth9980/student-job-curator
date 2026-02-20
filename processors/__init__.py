@@ -1,1 +1,7 @@
-# Phase B – Filtering Layer (to be implemented)
+from .filter import FilterResult, Gate, filter_jobs
+
+__all__ = [
+    "FilterResult",
+    "Gate",
+    "filter_jobs",
+]
