@@ -8,13 +8,13 @@ Current status
 --------------
     Phase A  ✓  Extraction  (extractors/)
     Phase B  ✓  Filtering   (processors/)
-    Phase C  ○  Storage     (database/ – stub, wired in next iteration)
+    Phase C  ✓  Storage     (database/)
 
 Usage
 -----
     pip install -r requirements.txt
     playwright install chromium
-    cp .env.example .env   # then fill in ANTHROPIC_API_KEY
+    cp .env.example .env   # fill in ANTHROPIC_API_KEY and DATABASE_URL
     python main.py
 """
 
@@ -24,6 +24,7 @@ import os
 
 from dotenv import load_dotenv
 
+from database import UpsertSummary, init_db, upsert_jobs
 from extractors import GreenhouseExtractor, LeverExtractor, RawJob
 from processors import FilterResult, filter_jobs
 
@@ -117,6 +118,9 @@ async def main() -> None:
         len(TARGETS), MAX_CONCURRENCY, FETCH_DESCRIPTIONS,
     )
 
+    # ── Phase C: initialise database schema (no-op if already exists) ────────
+    await init_db()
+
     semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
     # Fire all extraction tasks concurrently, bounded by the semaphore
@@ -139,12 +143,11 @@ async def main() -> None:
         len(passing_jobs), len(all_jobs),
     )
 
-    # ── Phase C stub – storage will be inserted here ──────────────────────
-    # from database.repository import upsert_jobs
-    # await upsert_jobs(passing_jobs)
+    # ── Phase C: persist passing jobs to the database ─────────────────────
+    summary: UpsertSummary = await upsert_jobs(filter_results)
     logger.info(
-        "Storage stub | jobs_to_store=%d (Phase C not yet wired)",
-        len(passing_jobs),
+        "Storage complete | upserted=%d passed=%d total_received=%d",
+        summary.upserted, summary.total_passed, summary.total_received,
     )
 
     # ── Preview: passing jobs ─────────────────────────────────────────────
@@ -161,9 +164,8 @@ async def main() -> None:
         logger.info("── Rejected jobs (first 5) ──────────────────────────")
         for result in rejected[:5]:
             logger.info(
-                "  [%s] %r – gate=%s reason=%r",
-                result.gate.value, result.job.title,
-                result.gate.value, result.reasoning,
+                "  [%-14s] %r  reason=%r",
+                result.gate.value, result.job.title, result.reasoning,
             )
 
 
