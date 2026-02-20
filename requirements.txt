@@ -1,0 +1,14 @@
+# ── Phase A: Extraction ────────────────────────────────────────────────────
+playwright>=1.40.0
+playwright-stealth>=1.0.6
+
+# ── Phase B: Filtering ─────────────────────────────────────────────────────
+anthropic>=0.34.0
+
+# ── Phase C: Storage ───────────────────────────────────────────────────────
+SQLAlchemy>=2.0.0
+aiosqlite>=0.20.0           # SQLite async driver (local dev)
+asyncpg>=0.29.0             # Postgres async driver (production)
+
+# ── Shared ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
