@@ -1,6 +1,6 @@
 # ── Phase A: Extraction ────────────────────────────────────────────────────
 playwright>=1.40.0
-playwright-stealth>=1.0.6
+playwright-stealth==1.0.6
 
 # ── Phase B: Filtering ─────────────────────────────────────────────────────
 google-genai>=0.8.0
