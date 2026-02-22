@@ -24,11 +24,11 @@ import os
 
 from dotenv import load_dotenv
 
+load_dotenv()  # must run before any project imports that read os.getenv() at module level
+
 from database import UpsertSummary, init_db, upsert_jobs
 from extractors import GreenhouseExtractor, LeverExtractor, RawJob
 from processors import FilterResult, filter_jobs
-
-load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Logging – structured timestamps; no bare print() statements anywhere

@@ -36,10 +36,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
+load_dotenv()  # must run before any project imports that read os.getenv() at module level
+
 from database.cleanup import delete_stale_jobs
 from notifier.discord import send_new_jobs_digest
-
-load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Logging
