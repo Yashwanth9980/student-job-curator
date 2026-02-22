@@ -40,10 +40,16 @@ def get_engine() -> AsyncEngine:
         logger.info(
             "Creating database engine | url=%s", _mask_password(DATABASE_URL)
         )
+        _is_sqlite = DATABASE_URL.lower().startswith("sqlite")
         _engine = create_async_engine(
             DATABASE_URL,
             echo=False,           # set True to log all SQL statements for debugging
-            pool_pre_ping=True,   # validate connections before checkout (Postgres)
+            # pool_pre_ping validates connections before checkout; useful for Postgres
+            # but not needed for SQLite and can cause issues on Windows.
+            pool_pre_ping=not _is_sqlite,
+            # aiosqlite requires check_same_thread=False so the async driver's
+            # worker thread can share the connection with the calling event loop.
+            **({"connect_args": {"check_same_thread": False}} if _is_sqlite else {}),
         )
     return _engine
 

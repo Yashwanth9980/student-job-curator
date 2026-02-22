@@ -292,8 +292,15 @@ class LLMGate:
         if not jobs:
             return []
         if self._client is None:
-            logger.info("LLM gate disabled (no GEMINI_API_KEY) – keeping all %d ambiguous jobs", len(jobs))
-            return [FilterResult(job=j, passed=True, gate=Gate.LLM_ERROR, reasoning="llm_disabled") for j in jobs]
+            logger.info(
+                "LLM gate disabled (no GEMINI_API_KEY) – rejecting all %d ambiguous jobs "
+                "to keep board freshers-only (set GEMINI_API_KEY to enable semantic approval)",
+                len(jobs),
+            )
+            return [
+                FilterResult(job=j, passed=False, gate=Gate.LLM_ERROR, reasoning="llm_disabled")
+                for j in jobs
+            ]
 
         batches = [
             jobs[i : i + LLM_BATCH_SIZE]
