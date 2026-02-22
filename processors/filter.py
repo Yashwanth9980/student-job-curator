@@ -65,8 +65,12 @@ logger = logging.getLogger(__name__)
 # Characters of raw_description forwarded to the LLM (cost control)
 MAX_DESCRIPTION_CHARS: int = int(os.getenv("MAX_DESCRIPTION_CHARS", "3000"))
 
-# Max simultaneous Gemini API calls (stays within rate limits)
-LLM_CONCURRENCY: int = int(os.getenv("LLM_CONCURRENCY", "5"))
+# Jobs per LLM API call.  10 reduces 350 individual calls to 35 batch calls.
+LLM_BATCH_SIZE: int = int(os.getenv("LLM_BATCH_SIZE", "10"))
+
+# Maximum LLM requests per minute.  Gemini free tier allows 15 RPM;
+# we default to 12 to leave headroom for transient spikes.
+LLM_RPM_LIMIT: int = int(os.getenv("LLM_RPM_LIMIT", "12"))
 
 # gemini-2.0-flash: fast, free-tier eligible, sufficient for binary classification.
 # Override with FILTER_MODEL=gemini-1.5-pro for higher accuracy.
@@ -141,11 +145,16 @@ class FilterResult:
 # ---------------------------------------------------------------------------
 
 class LLMDecision(BaseModel):
-    """Structured output schema returned by the LLM gate."""
+    """Structured output schema for a single job classification."""
     is_entry_level: bool
     max_years_required: int          # Best estimate; 0 when not stated
     confidence: Literal["high", "medium", "low"]
     reasoning: str                   # ≤ 2 sentences explaining the verdict
+
+
+class _BatchResponse(BaseModel):
+    """Wrapper so Gemini returns a stable JSON object with a named array."""
+    decisions: list[LLMDecision]
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +221,10 @@ You are a job-board classifier for a student and new-graduate job board.
 
 TASK
 ────
-Decide whether a job listing is appropriate for candidates with 0–1 years
-of professional experience: students, recent graduates, or people making
-their first career step with no prior relevant work history.
+You will receive a numbered list of job listings.  For EACH one, decide
+whether it is appropriate for candidates with 0–1 years of professional
+experience: students, recent graduates, or people making their first
+career step with no prior relevant work history.
 
 ENTRY-LEVEL (is_entry_level = true) when the role:
   • Explicitly states 0–1 years or "no experience required"
@@ -232,32 +242,109 @@ UNCERTAINTY
 If evidence is absent or contradictory, lean toward is_entry_level = true
 and set confidence = "low". Never drop a job due to insufficient data.
 
-Respond ONLY with valid JSON matching the provided schema.\
+Return a JSON object with a single key "decisions" containing an array of
+exactly N objects (one per job, in the same order), each with fields:
+  is_entry_level, max_years_required, confidence, reasoning.\
 """
+
+_CONSERVATIVE_DECISION = LLMDecision(
+    is_entry_level=True,
+    max_years_required=0,
+    confidence="low",
+    reasoning="LLM unavailable – kept conservatively to avoid data loss.",
+)
 
 
 class LLMGate:
     """
     Semantic classifier backed by Gemini with Pydantic-enforced JSON output.
 
-    A module-level semaphore caps concurrent API calls so we stay within
-    Gemini's rate limits even when many ambiguous jobs arrive at once.
+    Jobs are sent in batches (default 10 per request) to stay within the
+    Gemini free-tier rate limit (15 RPM).  A token-bucket style delay is
+    applied between batch requests.
     """
 
     def __init__(self) -> None:
         self._client = genai.Client(api_key=GEMINI_API_KEY)
-        self._semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
 
-    async def evaluate(self, job: RawJob) -> LLMDecision:
+    # ------------------------------------------------------------------
+    # Public: classify all ambiguous jobs with rate-limited batching
+    # ------------------------------------------------------------------
+
+    async def evaluate_all(self, jobs: list[RawJob]) -> list[FilterResult]:
         """
-        Call the Gemini API and return a validated LLMDecision.
+        Classify every job in *jobs* using batched API calls.
 
-        On any API failure the method logs a warning and returns a conservative
-        pass (is_entry_level=True) so ambiguous jobs are never silently dropped.
+        Batches are sent sequentially with a minimum inter-request interval
+        derived from LLM_RPM_LIMIT so we never exceed the API quota.
         """
-        prompt = self._build_prompt(job)
+        if not jobs:
+            return []
 
-        async with self._semaphore:
+        batches = [
+            jobs[i : i + LLM_BATCH_SIZE]
+            for i in range(0, len(jobs), LLM_BATCH_SIZE)
+        ]
+        min_interval = 60.0 / LLM_RPM_LIMIT  # seconds between requests
+
+        logger.info(
+            "LLM gate: %d ambiguous jobs → %d batches "
+            "(batch_size=%d, rpm_limit=%d)",
+            len(jobs), len(batches), LLM_BATCH_SIZE, LLM_RPM_LIMIT,
+        )
+
+        results: list[FilterResult] = []
+        last_call_time: float = 0.0
+
+        for batch_idx, batch in enumerate(batches, 1):
+            # ── Rate limiting ──────────────────────────────────────────
+            now = asyncio.get_event_loop().time()
+            wait = min_interval - (now - last_call_time)
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+            logger.debug(
+                "LLM batch %d/%d | size=%d", batch_idx, len(batches), len(batch)
+            )
+            last_call_time = asyncio.get_event_loop().time()
+
+            decisions = await self._call_batch(batch)
+
+            for job, decision in zip(batch, decisions):
+                if "LLM unavailable" in decision.reasoning:
+                    gate = Gate.LLM_ERROR
+                elif decision.is_entry_level:
+                    gate = Gate.LLM_PASS
+                else:
+                    gate = Gate.LLM_REJECT
+
+                results.append(
+                    FilterResult(
+                        job=job,
+                        passed=decision.is_entry_level,
+                        gate=gate,
+                        reasoning=decision.reasoning,
+                    )
+                )
+
+        return results
+
+    # ------------------------------------------------------------------
+    # Private: single batch API call with retry on rate-limit
+    # ------------------------------------------------------------------
+
+    async def _call_batch(self, jobs: list[RawJob]) -> list[LLMDecision]:
+        """
+        Send one batch to Gemini and return a decision per job.
+
+        Retries up to 3 times with exponential back-off on 429s.
+        Falls back to conservative pass for all jobs in the batch on
+        unrecoverable errors.
+        """
+        prompt = self._build_batch_prompt(jobs)
+        fallback = [_CONSERVATIVE_DECISION] * len(jobs)
+
+        for attempt in range(3):
             try:
                 response = await self._client.aio.models.generate_content(
                     model=FILTER_MODEL,
@@ -265,73 +352,85 @@ class LLMGate:
                     config=genai_types.GenerateContentConfig(
                         system_instruction=_SYSTEM_PROMPT,
                         response_mime_type="application/json",
-                        response_schema=LLMDecision,
-                        max_output_tokens=256,
+                        response_schema=_BatchResponse,
+                        max_output_tokens=300 * len(jobs),
                     ),
                 )
-                decision = LLMDecision.model_validate_json(response.text)
+                batch_resp = _BatchResponse.model_validate_json(response.text)
+                if len(batch_resp.decisions) != len(jobs):
+                    raise ValueError(
+                        f"Expected {len(jobs)} decisions, "
+                        f"got {len(batch_resp.decisions)}"
+                    )
                 logger.debug(
-                    "LLM decision | title=%r entry=%s years=%d conf=%s",
-                    job.title,
-                    decision.is_entry_level,
-                    decision.max_years_required,
-                    decision.confidence,
+                    "Batch classified | size=%d pass=%d reject=%d",
+                    len(jobs),
+                    sum(1 for d in batch_resp.decisions if d.is_entry_level),
+                    sum(1 for d in batch_resp.decisions if not d.is_entry_level),
                 )
-                return decision
+                return batch_resp.decisions
 
             except genai_errors.ClientError as exc:
                 if "429" in str(exc) or "quota" in str(exc).lower():
+                    backoff = 10 * (2 ** attempt)  # 10s, 20s, 40s
                     logger.warning(
-                        "Rate limit hit | job_id=%s – keeping conservatively",
-                        job.job_id,
+                        "Rate limit on batch (attempt %d/3) – sleeping %ds",
+                        attempt + 1, backoff,
                     )
+                    await asyncio.sleep(backoff)
                 else:
-                    logger.warning(
-                        "Client error   | job_id=%s err=%s – keeping conservatively",
-                        job.job_id, exc,
-                    )
-            except genai_errors.ServerError as exc:
-                logger.warning(
-                    "Server error   | job_id=%s err=%s – keeping conservatively",
-                    job.job_id, exc,
-                )
-            except Exception:
-                logger.exception(
-                    "Unexpected LLM error | job_id=%s – keeping conservatively",
-                    job.job_id,
-                )
+                    logger.warning("Batch client error (non-429): %s", exc)
+                    break
 
-        # Conservative fallback: keep the job, do not silently discard it
-        return LLMDecision(
-            is_entry_level=True,
-            max_years_required=0,
-            confidence="low",
-            reasoning="LLM unavailable – kept conservatively to avoid data loss.",
+            except genai_errors.ServerError as exc:
+                logger.warning("Batch server error: %s", exc)
+                break
+
+            except Exception:
+                logger.exception("Unexpected error in LLM batch call")
+                break
+
+        logger.warning(
+            "All attempts failed for batch of %d jobs – keeping conservatively",
+            len(jobs),
         )
+        return fallback
+
+    # ------------------------------------------------------------------
+    # Private: prompt builders
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_prompt(job: RawJob) -> str:
-        """Assemble a compact, token-efficient prompt for a single job."""
-        description = (job.raw_description or "").strip()
-        if len(description) > MAX_DESCRIPTION_CHARS:
-            description = description[:MAX_DESCRIPTION_CHARS] + "\n[description truncated]"
-
-        lines = [
-            f"Job Title:  {job.title}",
-            f"Company:    {job.company}",
-            f"Location:   {job.location}",
+    def _build_batch_prompt(jobs: list[RawJob]) -> str:
+        """Build a numbered multi-job prompt for a single API call."""
+        sections: list[str] = [
+            f"Classify the following {len(jobs)} job listing(s):\n"
         ]
-        if job.department:
-            lines.append(f"Department: {job.department}")
-        if job.employment_type:
-            lines.append(f"Work Type:  {job.employment_type}")
+        for idx, job in enumerate(jobs, 1):
+            description = (job.raw_description or "").strip()
+            if len(description) > MAX_DESCRIPTION_CHARS:
+                description = (
+                    description[:MAX_DESCRIPTION_CHARS] + "\n[description truncated]"
+                )
 
-        if description:
-            lines.append(f"\nJob Description:\n{description}")
-        else:
-            lines.append("\n(No description provided – classify from title only.)")
+            lines = [
+                f"--- Job {idx} ---",
+                f"Title:      {job.title}",
+                f"Company:    {job.company}",
+                f"Location:   {job.location}",
+            ]
+            if job.department:
+                lines.append(f"Department: {job.department}")
+            if job.employment_type:
+                lines.append(f"Work Type:  {job.employment_type}")
+            if description:
+                lines.append(f"\nDescription:\n{description}")
+            else:
+                lines.append("\n(No description – classify from title only.)")
 
-        return "\n".join(lines)
+            sections.append("\n".join(lines))
+
+        return "\n\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +447,10 @@ _llm_gate   = LLMGate()
 
 async def filter_jobs(jobs: list[RawJob]) -> list[FilterResult]:
     """
-    Run every RawJob through the two-stage filter pipeline concurrently.
+    Run every RawJob through the two-stage filter pipeline.
+
+    Stage 1 (regex) runs synchronously for all jobs first.
+    Stage 2 (LLM) runs only for ambiguous jobs, in rate-limited batches.
 
     Returns a FilterResult for **every** input job (passed and rejected) so
     callers can audit what was dropped and why without any silent data loss.
@@ -370,52 +472,39 @@ async def filter_jobs(jobs: list[RawJob]) -> list[FilterResult]:
 
     logger.info("Filter pipeline starting | total_jobs=%d", len(jobs))
 
-    tasks = [_evaluate_one(job) for job in jobs]
-    results: list[FilterResult] = await asyncio.gather(*tasks)
+    # ── Stage 1: regex gate (no API calls, runs instantly) ────────────
+    results: list[FilterResult] = []
+    ambiguous: list[RawJob] = []
+
+    for job in jobs:
+        verdict = _regex_gate.evaluate(job)
+        if verdict is True:
+            results.append(FilterResult(
+                job=job,
+                passed=True,
+                gate=Gate.REGEX_PASS,
+                reasoning="Matched an entry-level / internship keyword pattern.",
+            ))
+        elif verdict is False:
+            results.append(FilterResult(
+                job=job,
+                passed=False,
+                gate=Gate.REGEX_REJECT,
+                reasoning=(
+                    "Matched a senior-role keyword or explicit ≥2-year "
+                    "experience requirement."
+                ),
+            ))
+        else:
+            ambiguous.append(job)
+
+    # ── Stage 2: LLM gate (batched, rate-limited) ─────────────────────
+    if ambiguous:
+        llm_results = await _llm_gate.evaluate_all(ambiguous)
+        results.extend(llm_results)
 
     _log_summary(results)
     return results
-
-
-async def _evaluate_one(job: RawJob) -> FilterResult:
-    """Apply Stage 1, then Stage 2 if needed, for a single job."""
-    regex_verdict = _regex_gate.evaluate(job)
-
-    if regex_verdict is True:
-        return FilterResult(
-            job=job,
-            passed=True,
-            gate=Gate.REGEX_PASS,
-            reasoning="Matched an entry-level / internship keyword pattern.",
-        )
-
-    if regex_verdict is False:
-        return FilterResult(
-            job=job,
-            passed=False,
-            gate=Gate.REGEX_REJECT,
-            reasoning=(
-                "Matched a senior-role keyword or explicit ≥2-year "
-                "experience requirement."
-            ),
-        )
-
-    # Ambiguous title – pay for LLM analysis
-    decision = await _llm_gate.evaluate(job)
-
-    if "LLM unavailable" in decision.reasoning:
-        gate = Gate.LLM_ERROR
-    elif decision.is_entry_level:
-        gate = Gate.LLM_PASS
-    else:
-        gate = Gate.LLM_REJECT
-
-    return FilterResult(
-        job=job,
-        passed=decision.is_entry_level,
-        gate=gate,
-        reasoning=decision.reasoning,
-    )
 
 
 def _log_summary(results: list[FilterResult]) -> None:
