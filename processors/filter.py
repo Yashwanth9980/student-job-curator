@@ -265,7 +265,7 @@ class LLMGate:
     """
 
     def __init__(self) -> None:
-        self._client = genai.Client(api_key=GEMINI_API_KEY)
+        self._client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
     # ------------------------------------------------------------------
     # Public: classify all ambiguous jobs with rate-limited batching
@@ -280,6 +280,9 @@ class LLMGate:
         """
         if not jobs:
             return []
+        if self._client is None:
+            logger.info("LLM gate disabled (no GEMINI_API_KEY) – keeping all %d ambiguous jobs", len(jobs))
+            return [FilterResult(job=j, passed=True, gate=Gate.LLM_ERROR, reasoning="llm_disabled") for j in jobs]
 
         batches = [
             jobs[i : i + LLM_BATCH_SIZE]
