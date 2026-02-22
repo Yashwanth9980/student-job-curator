@@ -9,10 +9,11 @@ Inspects the job title and, when available, the description for hard signals.
 
   REJECT immediately  →  "Senior", "Sr.", "Lead", "Principal", "Staff",
                           "Manager", "Director", or an explicit requirement
-                          of ≥ 2 years experience found in the text.
+                          of ≥ 1 year experience found in the text.
 
   PASS immediately    →  "Intern", "Internship", "Co-op", "Junior", "Jr.",
-                          "Entry-level", "New Grad", "Early Career", etc.
+                          "Entry-level", "New Grad", "Fresher", "Trainee",
+                          "Campus Hire", "Graduate Programme", etc.
 
   AMBIGUOUS           →  Neither signal found → forward to Stage 2.
 
@@ -20,8 +21,9 @@ Stage 2 – LLMGate  (Google Gemini API, free tier available)
 ────────────────────────────────────────────────────────────
 Only reached when Stage 1 returns no clear verdict.
 Sends (title + truncated description) to Gemini and enforces a strict Pydantic
-JSON schema via structured output.  Approves only roles that plausibly
-require 0–1 years of professional experience.
+JSON schema via structured output.  Approves ONLY roles that explicitly
+welcome freshers / candidates with zero professional experience.
+When uncertain, the LLM rejects (strict freshers-only mode).
 
 Cost controls
 ─────────────
@@ -95,13 +97,15 @@ _REJECT_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Title or description snippet contains these → hard pass
+# Title or description snippet contains these → hard pass (freshers-only signals)
 _PASS_KEYWORDS_RE = re.compile(
     r"\b("
     r"intern(?:ship)?|co[.\-]?op|"
     r"entry[.\-]?level|junior|jr\.?|"
     r"new\s*grad(?:uate)?|"
     r"early[.\-]?career|apprentice|trainee|"
+    r"fresher|fresh\s*graduate|"
+    r"campus\s+(?:hire|recruit)|graduate\s+(?:program|programme|trainee)|"
     r"associate\s+(?:engineer|developer|analyst|scientist)"
     r")\b",
     re.IGNORECASE,
@@ -202,12 +206,17 @@ class RegexGate:
 
     @staticmethod
     def _requires_senior_experience(text: str) -> bool:
-        """Return True if text contains an explicit ≥2-year requirement."""
+        """Return True if text contains an explicit ≥1-year requirement.
+
+        Freshers-only mode: any role requiring 1+ years of experience is not
+        suitable for candidates with no work history.  A range like "0–1 years"
+        still passes because the lower bound is 0.
+        """
         for match in _YEARS_EXP_RE.finditer(text):
             groups = match.groups()
             # The minimum years value lives in whichever group matched
             min_years = next((int(g) for g in groups if g is not None), 0)
-            if min_years >= 2:
+            if min_years >= 1:
                 return True
         return False
 
@@ -217,30 +226,32 @@ class RegexGate:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are a job-board classifier for a student and new-graduate job board.
+You are a job-board classifier for a FRESHERS-ONLY job board targeting
+students and people with zero professional work experience.
 
 TASK
 ────
 You will receive a numbered list of job listings.  For EACH one, decide
-whether it is appropriate for candidates with 0–1 years of professional
-experience: students, recent graduates, or people making their first
-career step with no prior relevant work history.
+whether it is open to candidates with NO prior work experience (freshers,
+final-year students, or brand-new graduates with 0 years of experience).
 
-ENTRY-LEVEL (is_entry_level = true) when the role:
-  • Explicitly states 0–1 years or "no experience required"
-  • Is an internship, co-op, apprenticeship, or graduate programme
-  • Has responsibilities appropriate for someone learning on the job
-  • Does not require domain expertise that takes years to acquire
+FRESHER-FRIENDLY (is_entry_level = true) ONLY when the role:
+  • Explicitly requires 0 years of experience, or states "no experience needed"
+  • Is an internship, co-op, apprenticeship, campus hire, or graduate programme
+  • Is labelled "fresher", "fresh graduate", "trainee", "junior", or equivalent
+  • Has on-the-job training / mentorship language suggesting no prior experience needed
 
-NOT ENTRY-LEVEL (is_entry_level = false) when the role:
-  • Requires ≥ 2 years of professional experience
-  • Lists responsibilities that clearly assume prior industry exposure
-  • Uses seniority language or compensation consistent with experienced hires
+NOT FRESHER-FRIENDLY (is_entry_level = false) when the role:
+  • Requires 1 or more years of professional experience
+  • Assumes prior industry knowledge, domain expertise, or production experience
+  • Uses seniority language (senior, lead, staff, principal, manager, etc.)
+  • Compensation or responsibilities clearly target experienced hires
 
 UNCERTAINTY
 ───────────
-If evidence is absent or contradictory, lean toward is_entry_level = true
-and set confidence = "low". Never drop a job due to insufficient data.
+If the listing gives NO clear signal either way, set is_entry_level = false
+and confidence = "low".  Only approve a role when there is positive evidence
+it welcomes freshers.  When in doubt, reject.
 
 Return a JSON object with a single key "decisions" containing an array of
 exactly N objects (one per job, in the same order), each with fields:
@@ -248,10 +259,10 @@ exactly N objects (one per job, in the same order), each with fields:
 """
 
 _CONSERVATIVE_DECISION = LLMDecision(
-    is_entry_level=True,
+    is_entry_level=False,
     max_years_required=0,
     confidence="low",
-    reasoning="LLM unavailable – kept conservatively to avoid data loss.",
+    reasoning="LLM unavailable – rejected to keep board freshers-only.",
 )
 
 
