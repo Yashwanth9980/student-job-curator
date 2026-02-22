@@ -21,6 +21,7 @@ Usage
 import asyncio
 import logging
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -46,14 +47,36 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 TARGETS: list[tuple[str, str, str]] = [
     # ── Lever ──────────────────────────────────────────────────────────────
-    ("netflix",  "Netflix",  "lever"),
-    ("figma",    "Figma",    "lever"),
-    ("notion",   "Notion",   "lever"),
+    ("netflix",    "Netflix",    "lever"),
+    ("razorpay",   "Razorpay",   "lever"),   # Bangalore HQ
+    ("meesho",     "Meesho",     "lever"),   # Bangalore HQ
     # ── Greenhouse ─────────────────────────────────────────────────────────
-    ("airbnb",   "Airbnb",   "greenhouse"),
-    ("stripe",   "Stripe",   "greenhouse"),
-    ("coinbase", "Coinbase", "greenhouse"),
+    ("airbnb",     "Airbnb",     "greenhouse"),
+    ("stripe",     "Stripe",     "greenhouse"),
+    ("coinbase",   "Coinbase",   "greenhouse"),
+    ("freshworks", "Freshworks", "greenhouse"),  # India HQ, large Bangalore office
+    ("chargebee",  "Chargebee",  "greenhouse"),  # Bangalore office
+    ("uber",       "Uber",       "greenhouse"),  # large Bangalore tech centre
+    ("twilio",     "Twilio",     "greenhouse"),  # Bangalore office
 ]
+
+# ---------------------------------------------------------------------------
+# Location filter – only keep jobs whose location mentions Bangalore / India
+# ---------------------------------------------------------------------------
+
+# Match any of these tokens (case-insensitive) in job.location
+_LOCATION_RE = re.compile(
+    r"\b(bangalore|bengaluru|india|karnataka)\b",
+    re.IGNORECASE,
+)
+
+# Set LOCATION_FILTER=false in .env to disable and see jobs from all regions
+LOCATION_FILTER: bool = os.getenv("LOCATION_FILTER", "true").lower() != "false"
+
+
+def _location_matches(job: RawJob) -> bool:
+    """Return True if the job's location is in the Bangalore / India region."""
+    return bool(_LOCATION_RE.search(job.location or ""))
 
 # Read from environment; default to 3 concurrent browser sessions
 MAX_CONCURRENCY: int = int(os.getenv("MAX_CONCURRENCY", "3"))
@@ -114,8 +137,9 @@ async def run_extractor(
 
 async def main() -> None:
     logger.info(
-        "Pipeline starting | targets=%d max_concurrency=%d fetch_descriptions=%s",
-        len(TARGETS), MAX_CONCURRENCY, FETCH_DESCRIPTIONS,
+        "Pipeline starting | targets=%d max_concurrency=%d "
+        "fetch_descriptions=%s location_filter=%s",
+        len(TARGETS), MAX_CONCURRENCY, FETCH_DESCRIPTIONS, LOCATION_FILTER,
     )
 
     # ── Phase C: initialise database schema (no-op if already exists) ────────
@@ -134,6 +158,15 @@ async def main() -> None:
     logger.info(
         "Extraction complete | total_jobs_extracted=%d", len(all_jobs)
     )
+
+    # ── Location pre-filter (Bangalore / India) ───────────────────────────
+    if LOCATION_FILTER:
+        before = len(all_jobs)
+        all_jobs = [j for j in all_jobs if _location_matches(j)]
+        logger.info(
+            "Location filter | kept=%d / %d  (region=Bangalore/India)",
+            len(all_jobs), before,
+        )
 
     # ── Phase B – filtering ───────────────────────────────────────────────
     filter_results: list[FilterResult] = await filter_jobs(all_jobs)
