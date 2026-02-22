@@ -10,5 +10,15 @@ SQLAlchemy>=2.0.0
 aiosqlite>=0.20.0           # SQLite async driver (local dev)
 asyncpg>=0.29.0             # Postgres async driver (production)
 
+# ── Phase D: Scheduling ────────────────────────────────────────────────────
+apscheduler>=3.10.0,<4      # 3.x API (AsyncIOScheduler); v4 has a different API
+
+# ── Phase F: API ───────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# ── Phase G: Notifications ─────────────────────────────────────────────────
+httpx>=0.27.0               # async HTTP client for Discord webhook calls
+
 # ── Shared ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
