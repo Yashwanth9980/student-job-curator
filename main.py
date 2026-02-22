@@ -46,18 +46,25 @@ logger = logging.getLogger(__name__)
 # Each tuple: (company_slug, human_readable_name, platform)
 # ---------------------------------------------------------------------------
 TARGETS: list[tuple[str, str, str]] = [
-    # ── Lever ──────────────────────────────────────────────────────────────
-    ("netflix",    "Netflix",    "lever"),
-    ("razorpay",   "Razorpay",   "lever"),   # Bangalore HQ
-    ("meesho",     "Meesho",     "lever"),   # Bangalore HQ
-    # ── Greenhouse ─────────────────────────────────────────────────────────
-    ("airbnb",     "Airbnb",     "greenhouse"),
-    ("stripe",     "Stripe",     "greenhouse"),
-    ("coinbase",   "Coinbase",   "greenhouse"),
-    ("freshworks", "Freshworks", "greenhouse"),  # India HQ, large Bangalore office
-    ("chargebee",  "Chargebee",  "greenhouse"),  # Bangalore office
-    ("uber",       "Uber",       "greenhouse"),  # large Bangalore tech centre
-    ("twilio",     "Twilio",     "greenhouse"),  # Bangalore office
+    # ── Lever – Bangalore-headquartered startups ────────────────────────────
+    ("razorpay",    "Razorpay",    "lever"),   # Bangalore HQ – fintech unicorn
+    ("meesho",      "Meesho",      "lever"),   # Bangalore HQ – social commerce
+    ("cred",        "CRED",        "lever"),   # Bangalore HQ – fintech startup
+    # ── Greenhouse – Bangalore-HQ / heavy Bangalore presence ───────────────
+    ("freshworks",  "Freshworks",  "greenhouse"),  # India HQ, Bangalore office
+    ("chargebee",   "Chargebee",   "greenhouse"),  # Bangalore office
+    ("browserstack","BrowserStack","greenhouse"),  # Bangalore HQ – dev tooling
+    ("postman",     "Postman",     "greenhouse"),  # Bangalore HQ – API platform
+    ("inmobi",      "InMobi",      "greenhouse"),  # Bangalore HQ – adtech
+    ("ather-energy","Ather Energy","greenhouse"),  # Bangalore HQ – EV startup
+    # ── Greenhouse – global companies with large Bangalore tech centres ─────
+    ("stripe",      "Stripe",      "greenhouse"),
+    ("uber",        "Uber",        "greenhouse"),
+    ("twilio",      "Twilio",      "greenhouse"),
+    ("airbnb",      "Airbnb",      "greenhouse"),
+    ("coinbase",    "Coinbase",    "greenhouse"),
+    # ── Lever – global companies with Bangalore offices ─────────────────────
+    ("netflix",     "Netflix",     "lever"),
 ]
 
 # ---------------------------------------------------------------------------

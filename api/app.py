@@ -31,6 +31,7 @@ from database.engine import get_session_factory, init_db
 
 from .routes import router
 from .schemas import HealthResponse
+from .ui import ui_router
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +58,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(router)
+app.include_router(ui_router)   # serves GET / (dashboard)
+app.include_router(router)      # serves GET /jobs, GET /jobs/{platform}/{id}
 
 
 # ---------------------------------------------------------------------------
