@@ -16,19 +16,19 @@ Inspects the job title and, when available, the description for hard signals.
 
   AMBIGUOUS           →  Neither signal found → forward to Stage 2.
 
-Stage 2 – LLMGate  (Anthropic API, paid)
-─────────────────────────────────────────
+Stage 2 – LLMGate  (Google Gemini API, free tier available)
+────────────────────────────────────────────────────────────
 Only reached when Stage 1 returns no clear verdict.
-Sends (title + truncated description) to Claude and enforces a strict Pydantic
-JSON schema via `messages.parse()`.  Approves only roles that plausibly
+Sends (title + truncated description) to Gemini and enforces a strict Pydantic
+JSON schema via structured output.  Approves only roles that plausibly
 require 0–1 years of professional experience.
 
 Cost controls
 ─────────────
 • MAX_DESCRIPTION_CHARS caps the text sent to the LLM (default 3 000).
 • LLM_CONCURRENCY limits simultaneous API calls (default 5).
-• Model defaults to claude-haiku-4-5: correct choice for a high-volume binary
-  classification task; override via env var FILTER_MODEL.
+• Model defaults to gemini-2.0-flash: fast, free-tier eligible.
+  Override via env var FILTER_MODEL.
 • Conservative fallback on any API error: keep the job rather than silently
   discarding it.
 
@@ -49,7 +49,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
-import anthropic
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 from pydantic import BaseModel
 
 from extractors.base import RawJob
@@ -63,12 +65,15 @@ logger = logging.getLogger(__name__)
 # Characters of raw_description forwarded to the LLM (cost control)
 MAX_DESCRIPTION_CHARS: int = int(os.getenv("MAX_DESCRIPTION_CHARS", "3000"))
 
-# Max simultaneous Anthropic API calls (stays within rate limits)
+# Max simultaneous Gemini API calls (stays within rate limits)
 LLM_CONCURRENCY: int = int(os.getenv("LLM_CONCURRENCY", "5"))
 
-# Haiku: fast, cheap, sufficient for binary classification.
-# Callers who need higher accuracy can set FILTER_MODEL=claude-opus-4-6.
-FILTER_MODEL: str = os.getenv("FILTER_MODEL", "claude-haiku-4-5")
+# gemini-2.0-flash: fast, free-tier eligible, sufficient for binary classification.
+# Override with FILTER_MODEL=gemini-1.5-pro for higher accuracy.
+FILTER_MODEL: str = os.getenv("FILTER_MODEL", "gemini-2.0-flash")
+
+# Gemini API key (required for LLM gate)
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 
 
 # ---------------------------------------------------------------------------
@@ -233,19 +238,19 @@ Respond ONLY with valid JSON matching the provided schema.\
 
 class LLMGate:
     """
-    Semantic classifier backed by Claude with Pydantic-enforced JSON output.
+    Semantic classifier backed by Gemini with Pydantic-enforced JSON output.
 
     A module-level semaphore caps concurrent API calls so we stay within
-    Anthropic's rate limits even when many ambiguous jobs arrive at once.
+    Gemini's rate limits even when many ambiguous jobs arrive at once.
     """
 
     def __init__(self) -> None:
-        self._client = anthropic.AsyncAnthropic()
+        self._client = genai.Client(api_key=GEMINI_API_KEY)
         self._semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
 
     async def evaluate(self, job: RawJob) -> LLMDecision:
         """
-        Call the API and return a validated LLMDecision.
+        Call the Gemini API and return a validated LLMDecision.
 
         On any API failure the method logs a warning and returns a conservative
         pass (is_entry_level=True) so ambiguous jobs are never silently dropped.
@@ -254,14 +259,17 @@ class LLMGate:
 
         async with self._semaphore:
             try:
-                response = await self._client.messages.parse(
+                response = await self._client.aio.models.generate_content(
                     model=FILTER_MODEL,
-                    max_tokens=256,
-                    system=_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
-                    output_format=LLMDecision,
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=_SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        response_schema=LLMDecision,
+                        max_output_tokens=256,
+                    ),
                 )
-                decision: LLMDecision = response.parsed_output
+                decision = LLMDecision.model_validate_json(response.text)
                 logger.debug(
                     "LLM decision | title=%r entry=%s years=%d conf=%s",
                     job.title,
@@ -271,19 +279,20 @@ class LLMGate:
                 )
                 return decision
 
-            except anthropic.RateLimitError:
+            except genai_errors.ClientError as exc:
+                if "429" in str(exc) or "quota" in str(exc).lower():
+                    logger.warning(
+                        "Rate limit hit | job_id=%s – keeping conservatively",
+                        job.job_id,
+                    )
+                else:
+                    logger.warning(
+                        "Client error   | job_id=%s err=%s – keeping conservatively",
+                        job.job_id, exc,
+                    )
+            except genai_errors.ServerError as exc:
                 logger.warning(
-                    "Rate limit hit | job_id=%s – keeping conservatively",
-                    job.job_id,
-                )
-            except anthropic.APIConnectionError:
-                logger.warning(
-                    "Network error  | job_id=%s – keeping conservatively",
-                    job.job_id,
-                )
-            except anthropic.BadRequestError as exc:
-                logger.warning(
-                    "Bad request    | job_id=%s err=%s – keeping conservatively",
+                    "Server error   | job_id=%s err=%s – keeping conservatively",
                     job.job_id, exc,
                 )
             except Exception:
